@@ -1,105 +1,24 @@
-# HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis
+# Multi-stream HiFi-GAN NSF: Efficient and High-Fidelity Speech Synthesis with Data-Driven Waveform Decomposition
 
-### Jungil Kong, Jaehyeon Kim, Jaekyoung Bae
+This repository contains a PyTorch implementation of a modified HiFi-GAN generator, incorporating the **multi-stream architecture** and **sub-pixel convolution upsampling** proposed in the paper "[MULTI-STREAM HIFI-GAN WITH DATA-DRIVEN WAVEFORM DECOMPOSITION](https://ast-astrec.nict.go.jp/release/preprints/preprint_asru_2021_okamoto.pdf)" by Okamoto et al. (ASRU 2021).  This implementation builds upon the Neural Source-Filter (NSF) variant of HiFi-GAN, further enhancing its capabilities.
 
-In our [paper](https://arxiv.org/abs/2010.05646), 
-we proposed HiFi-GAN: a GAN-based model capable of generating high fidelity speech efficiently.<br/>
-We provide our implementation and pretrained models as open source in this repository.
+**Abstract of the Original HiFi-GAN Paper (for context):**
 
-**Abstract :**
-Several recent work on speech synthesis have employed generative adversarial networks (GANs) to produce raw waveforms. 
-Although such methods improve the sampling efficiency and memory usage, 
-their sample quality has not yet reached that of autoregressive and flow-based generative models. 
-In this work, we propose HiFi-GAN, which achieves both efficient and high-fidelity speech synthesis. 
-As speech audio consists of sinusoidal signals with various periods, 
-we demonstrate that modeling periodic patterns of an audio is crucial for enhancing sample quality. 
-A subjective human evaluation (mean opinion score, MOS) of a single speaker dataset indicates that our proposed method 
-demonstrates similarity to human quality while generating 22.05 kHz high-fidelity audio 167.9 times faster than 
-real-time on a single V100 GPU. We further show the generality of HiFi-GAN to the mel-spectrogram inversion of unseen 
-speakers and end-to-end speech synthesis. Finally, a small footprint version of HiFi-GAN generates samples 13.4 times 
-faster than real-time on CPU with comparable quality to an autoregressive counterpart.
+> Several recent work on speech synthesis have employed generative adversarial networks (GANs) to produce raw waveforms. Although such methods improve the sampling efficiency and memory usage, their sample quality has not yet reached that of autoregressive and flow-based generative models. In this work, we propose HiFi-GAN, which achieves both efficient and high-fidelity speech synthesis. As speech audio consists of sinusoidal signals with various periods, we demonstrate that modeling periodic patterns of an audio is crucial for enhancing sample quality. A subjective human evaluation (mean opinion score, MOS) of a single speaker dataset indicates that our proposed method demonstrates similarity to human quality while generating 22.05 kHz high-fidelity audio 167.9 times faster than real-time on a single V100 GPU. We further show the generality of HiFi-GAN to the mel-spectrogram inversion of unseen speakers and end-to-end speech synthesis. Finally, a small footprint version of HiFi-GAN generates samples 13.4 times faster than real-time on CPU with comparable quality to an autoregressive counterpart.
 
-Visit our [demo website](https://jik876.github.io/hifi-gan-demo/) for audio samples.
+**Key Modifications (Multi-stream HiFi-GAN NSF):**
 
+This implementation incorporates the following key modifications to the standard HiFi-GAN NSF architecture, as described in the Okamoto et al. paper:
 
-## Pre-requisites
-1. Python >= 3.6
-2. Clone this repository.
-3. Install python requirements. Please refer [requirements.txt](requirements.txt)
-4. Download and extract the [LJ Speech dataset](https://keithito.com/LJ-Speech-Dataset/).
-And move all wav files to `LJSpeech-1.1/wavs`
+*   **Multi-stream Architecture:**  Instead of generating a single waveform directly, the generator produces multiple *streams* of waveforms. These streams are then combined using a trainable convolutional layer (`stream_combiner`). This allows the model to learn a data-driven decomposition of the waveform, improving synthesis quality and/or efficiency.  This replaces the fixed synthesis filter bank used in traditional multi-band approaches.
 
+*   **Sub-pixel Convolution Upsampling:**  Traditional transposed convolutions (`ConvTranspose1d`) are replaced with sub-pixel convolutions (`nn.Conv1d` followed by `nn.PixelShuffle`).  Sub-pixel convolution has been shown to reduce artifacts in generated audio, leading to higher fidelity.
 
-## Training
-```
-python train.py --config config_v1.json
-```
-To train V2 or V3 Generator, replace `config_v1.json` with `config_v2.json` or `config_v3.json`.<br>
-Checkpoints and copy of the configuration file are saved in `cp_hifigan` directory by default.<br>
-You can change the path by adding `--checkpoint_path` option.
+*   **Neural Source-Filter (NSF) Integration:** The generator uses a Neural Source-Filter model, meaning it takes the fundamental frequency (F0) sequence as an explicit input, in addition to the mel-spectrogram, to add a signal for noise.
 
-Validation loss during training with V1 generator.<br>
-![validation loss](./validation_loss.png)
+**Benefits:**
 
-## Pretrained Model
-You can also use pretrained models we provide.<br/>
-[Download pretrained models](https://drive.google.com/drive/folders/1-eEYTB5Av9jNql0WGBlRoi-WH2J7bp5Y?usp=sharing)<br/> 
-Details of each folder are as in follows:
-
-|Folder Name|Generator|Dataset|Fine-Tuned|
-|------|---|---|---|
-|LJ_V1|V1|LJSpeech|No|
-|LJ_V2|V2|LJSpeech|No|
-|LJ_V3|V3|LJSpeech|No|
-|LJ_FT_T2_V1|V1|LJSpeech|Yes ([Tacotron2](https://github.com/NVIDIA/tacotron2))|
-|LJ_FT_T2_V2|V2|LJSpeech|Yes ([Tacotron2](https://github.com/NVIDIA/tacotron2))|
-|LJ_FT_T2_V3|V3|LJSpeech|Yes ([Tacotron2](https://github.com/NVIDIA/tacotron2))|
-|VCTK_V1|V1|VCTK|No|
-|VCTK_V2|V2|VCTK|No|
-|VCTK_V3|V3|VCTK|No|
-|UNIVERSAL_V1|V1|Universal|No|
-
-We provide the universal model with discriminator weights that can be used as a base for transfer learning to other datasets.
-
-## Fine-Tuning
-1. Generate mel-spectrograms in numpy format using [Tacotron2](https://github.com/NVIDIA/tacotron2) with teacher-forcing.<br/>
-The file name of the generated mel-spectrogram should match the audio file and the extension should be `.npy`.<br/>
-Example:
-    ```
-    Audio File : LJ001-0001.wav
-    Mel-Spectrogram File : LJ001-0001.npy
-    ```
-2. Create `ft_dataset` folder and copy the generated mel-spectrogram files into it.<br/>
-3. Run the following command.
-    ```
-    python train.py --fine_tuning True --config config_v1.json
-    ```
-    For other command line options, please refer to the training section.
-
-
-## Inference from wav file
-1. Make `test_files` directory and copy wav files into the directory.
-2. Run the following command.
-    ```
-    python inference.py --checkpoint_file [generator checkpoint file path]
-    ```
-Generated wav files are saved in `generated_files` by default.<br>
-You can change the path by adding `--output_dir` option.
-
-
-## Inference for end-to-end speech synthesis
-1. Make `test_mel_files` directory and copy generated mel-spectrogram files into the directory.<br>
-You can generate mel-spectrograms using [Tacotron2](https://github.com/NVIDIA/tacotron2), 
-[Glow-TTS](https://github.com/jaywalnut310/glow-tts) and so forth.
-2. Run the following command.
-    ```
-    python inference_e2e.py --checkpoint_file [generator checkpoint file path]
-    ```
-Generated wav files are saved in `generated_files_from_mel` by default.<br>
-You can change the path by adding `--output_dir` option.
-
-
-## Acknowledgements
-We referred to [WaveGlow](https://github.com/NVIDIA/waveglow), [MelGAN](https://github.com/descriptinc/melgan-neurips) 
-and [Tacotron2](https://github.com/NVIDIA/tacotron2) to implement this.
-
+*   **Improved Inference Speed:** The sub-pixel convolution upsampling is generally more efficient than transposed convolution, leading to faster waveform generation.
+*   **Enhanced Audio Quality:** The multi-stream architecture and sub-pixel convolution, combined, allow the model to learn more complex and detailed representations of the audio signal, potentially leading to improved perceptual quality (as demonstrated in the paper).
+*   **Data-Driven Decomposition:**  The model learns the optimal way to decompose the waveform into streams, rather than relying on a predefined fixed filter bank.
+* **Explicit control over F0** The use of NSF, allow a better manipulation over the audio
