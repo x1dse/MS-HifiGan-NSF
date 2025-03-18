@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,11 +42,6 @@ class SineGen(nn.Module):
         self.dim = self.harmonic_num + 1
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
-
-        self.merge = nn.Sequential(
-            nn.Linear(self.dim, 1, bias=False),
-            nn.Tanh(),
-        )
 
     def _f02uv(self, f0):
         # generate uv signal
