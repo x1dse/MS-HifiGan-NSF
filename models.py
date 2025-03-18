@@ -54,51 +54,89 @@ class SineGen(nn.Module):
         uv = uv * (f0 > self.voiced_threshold)
         return uv
 
-    def _f02sine(self, f0_values):
-        """f0_values: (batchsize, length, dim)
-        where dim indicates fundamental tone and overtones
+    def _f02sine(self, f0, upp):
+        """ f0: (batchsize, length, dim)
+            where dim indicates fundamental tone and overtones
         """
-        # convert to F0 in rad. The integer part n can be ignored
-        # because 2 * np.pi * n doesn't affect phase
-        rad_values = (f0_values / self.sampling_rate) % 1
-
-        # initial phase noise (no noise for fundamental component)
-        rand_ini = torch.rand(
-            f0_values.shape[0], f0_values.shape[2], device=f0_values.device
-        )
-        rand_ini[:, 0] = 0
-        rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
-
-        # instantanouse phase sine[t] = sin(2*pi \sum_i=1 ^{t} rad)
-        tmp_over_one = torch.cumsum(rad_values, 1) % 1
-        tmp_over_one_idx = (tmp_over_one[:, 1:, :] - tmp_over_one[:, :-1, :]) < 0
-        cumsum_shift = torch.zeros_like(rad_values)
-        cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
-
-        sines = torch.sin(torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * np.pi)
-
+        a = torch.arange(1, upp + 1, dtype=f0.dtype, device=f0.device)
+        rad = f0 / self.sampling_rate * a
+        rad2 = torch.fmod(rad[:, :-1, -1:].float() + 0.5, 1.0) - 0.5
+        rad_acc = rad2.cumsum(dim=1).fmod(1.0).to(f0)
+        rad += F.pad(rad_acc, (0, 0, 1, 0), mode='constant')
+        rad = rad.reshape(f0.shape[0], -1, 1)
+        b = torch.arange(1, self.dim + 1, dtype=f0.dtype, device=f0.device).reshape(1, 1, -1)
+        rad *= b
+        rand_ini = torch.rand(1, 1, self.dim, device=f0.device)
+        rand_ini[..., 0] = 0
+        rad += rand_ini
+        sines = torch.sin(2 * np.pi * rad)
         return sines
 
-    def forward(self, f0):
+    def forward(
+        self, f0: torch.Tensor, upp: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """sine_tensor, uv = forward(f0)
+        input F0: tensor(batchsize=1, length, dim=1)
+                  f0 for unvoiced steps should be 0
+        output sine_tensor: tensor(batchsize=1, length, dim)
+        output uv: tensor(batchsize=1, length, 1)
+        """
         with torch.no_grad():
-            f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
-            # fundamental component
-            f0_buf[:, :, 0] = f0[:, :, 0]
-            for idx in np.arange(self.harmonic_num):
-                f0_buf[:, :, idx + 1] = f0_buf[:, :, 0] * (idx + 2)
-
-            sine_waves = self._f02sine(f0_buf) * self.sine_amp
-
+            f0 = f0.unsqueeze(-1)
+            sine_waves = self._f02sine(f0, upp) * self.sine_amp
             uv = self._f02uv(f0)
-
+            uv: torch.Tensor = F.interpolate(
+                uv.transpose(2, 1), scale_factor=float(upp), mode="nearest"
+            ).transpose(2, 1)
             noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
             noise = noise_amp * torch.randn_like(sine_waves)
-
             sine_waves = sine_waves * uv + noise
-        # correct DC offset
-        sine_waves = sine_waves - sine_waves.mean(dim=1, keepdim=True)
-        # merge with grad
-        return self.merge(sine_waves)
+        return sine_waves, uv, noise
+
+class SourceModuleHnNSF(torch.nn.Module):
+    """SourceModule for hn-nsf
+    SourceModule(sampling_rate, harmonic_num=0, sine_amp=0.1,
+                 add_noise_std=0.003, voiced_threshod=0)
+    sampling_rate: sampling_rate in Hz
+    harmonic_num: number of harmonic above F0 (default: 0)
+    sine_amp: amplitude of sine source signal (default: 0.1)
+    add_noise_std: std of additive Gaussian noise (default: 0.003)
+        note that amplitude of noise in unvoiced is decided
+        by sine_amp
+    voiced_threshold: threhold to set U/V given F0 (default: 0)
+    Sine_source, noise_source = SourceModuleHnNSF(F0_sampled)
+    F0_sampled (batchsize, length, 1)
+    Sine_source (batchsize, length, 1)
+    noise_source (batchsize, length 1)
+    uv (batchsize, length, 1)
+    """
+
+    def __init__(
+        self,
+        sampling_rate,
+        harmonic_num=0,
+        sine_amp=0.1,
+        add_noise_std=0.003,
+        voiced_threshod=0,
+    ):
+        super(SourceModuleHnNSF, self).__init__()
+
+        self.sine_amp = sine_amp
+        self.noise_std = add_noise_std
+        # to produce sine waveforms
+        self.l_sin_gen = SineGen(
+            sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshod
+        )
+
+        # to merge source harmonics into a single excitation
+        self.l_linear = torch.nn.Linear(harmonic_num + 1, 1)
+        self.l_tanh = torch.nn.Tanh()
+
+    def forward(self, x: torch.Tensor, upp: int = 1):
+        sine_wavs, uv, _ = self.l_sin_gen(x, upp)
+        sine_wavs = sine_wavs.to(dtype=self.l_linear.weight.dtype)
+        sine_merge = self.l_tanh(self.l_linear(sine_wavs))
+        return sine_merge, None, None  # noise, uv
 
 
 class HiFiGANNSFGenerator(torch.nn.Module):
@@ -121,7 +159,7 @@ class HiFiGANNSFGenerator(torch.nn.Module):
         self.checkpointing = checkpointing
         self.num_streams = num_streams
         self.f0_upsamp = torch.nn.Upsample(scale_factor=math.prod(upsample_rates))
-        self.m_source = SineGen(sample_rate=sr)
+        self.m_source = SourceModuleHnNSF(sampling_rate=sr)
 
         self.conv_pre = torch.nn.Conv1d(
             initial_channel, upsample_initial_channel, 7, 1, padding=3
@@ -200,10 +238,8 @@ class HiFiGANNSFGenerator(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, f0: torch.Tensor, g: Optional[torch.Tensor] = None
     ):
-        f0 = F.interpolate(
-            f0.unsqueeze(1), size=x.shape[-1] * self.upp, mode="linear"
-        )
-        har_source = self.m_source(f0.transpose(1, 2)).transpose(1, 2)
+        har_source, _, _ = self.m_source(f0, self.upp)
+        har_source = har_source.transpose(1, 2)
         x = self.conv_pre(x)
 
         if g is not None:
