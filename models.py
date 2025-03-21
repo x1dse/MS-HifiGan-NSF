@@ -5,12 +5,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np 
-from torch.nn.utils import weight_norm, remove_weight_norm
+from torch.nn.utils import remove_weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 from torch.utils.checkpoint import checkpoint
 
-from commons import init_weights
-from residuals import LRELU_SLOPE, ResBlock
-
+from rvc.lib.algorithm.commons import init_weights
+from rvc.lib.algorithm.residuals import LRELU_SLOPE, ResBlock
 
 class SineGen(nn.Module):
     """
@@ -133,6 +133,29 @@ class SourceModuleHnNSF(torch.nn.Module):
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
         return sine_merge, None, None  # noise, uv
 
+class PixelShuffle1D(torch.nn.Module):
+    """
+    1D pixel shuffler. https://arxiv.org/pdf/1609.05158.pdf
+    Upscales sample length, downscales channel length
+    "short" is input, "long" is output
+    """
+    def __init__(self, upscale_factor):
+        super(PixelShuffle1D, self).__init__()
+        self.upscale_factor = upscale_factor
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        short_channel_len = x.shape[1]
+        short_width = x.shape[2]
+
+        long_channel_len = short_channel_len // self.upscale_factor
+        long_width = self.upscale_factor * short_width
+
+        x = x.contiguous().view([batch_size, self.upscale_factor, long_channel_len, short_width])
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = x.view(batch_size, long_channel_len, long_width)
+
+        return x
 
 class HiFiGANNSFGenerator(torch.nn.Module):
     def __init__(
@@ -180,15 +203,13 @@ class HiFiGANNSFGenerator(torch.nn.Module):
                     weight_norm(
                         nn.Conv1d(
                             in_channels=upsample_initial_channel // (2**i),
-                            out_channels=channels[i] * (
-                                u**2
-                            ),
-                            kernel_size=k,
+                            out_channels=channels[i] * (u * u),
+                            kernel_size=k - 1,
                             stride=1,
-                            padding=(k - 1) // 2
+                            padding=(k - 1) // 2,
                         )
                     ),
-                    nn.PixelShuffle(upscale_factor=u),
+                    PixelShuffle1D(upscale_factor=u),
                 )
             )
 
@@ -249,7 +270,6 @@ class HiFiGANNSFGenerator(torch.nn.Module):
                 x = checkpoint(ups, x, use_reentrant=False)
             else:
                 x = ups(x)
-
             # Add noise excitation
             x += noise_convs(har_source)
 
