@@ -204,7 +204,7 @@ class HiFiGANNSFGenerator(torch.nn.Module):
                     weight_norm(
                         nn.Conv1d(
                             in_channels=upsample_initial_channel // (2**i),
-                            out_channels=channels[i] * (u * u),
+                            out_channels=channels[i] * (u),
                             kernel_size=k - 1,
                             stride=1,
                             padding=(k - 1) // 2,
